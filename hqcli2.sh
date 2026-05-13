@@ -1,0 +1,52 @@
+#!/bin/bash
+# hq-cli_setup.sh — исправленный (без chattr, с проверкой DNS)
+
+set -e
+
+SUDO_PASS="P@ssword"
+
+run_sudo() {
+    echo "$SUDO_PASS" | sudo -S bash -c "$1"
+}
+
+echo "=== 1. Установка пакетов ==="
+run_sudo "dnf install -y samba-client samba-common oddjob oddjob-mkhomedir sssd realmd krb5-workstation adcli"
+
+echo "=== 2. Настройка DNS (контроллер домена) ==="
+run_sudo "systemctl stop systemd-resolved 2>/dev/null || true"
+run_sudo "systemctl mask systemd-resolved 2>/dev/null || true"
+run_sudo "echo 'nameserver 192.168.4.2' > /etc/resolv.conf"
+run_sudo "echo 'search au-team.irpo' >> /etc/resolv.conf"
+
+echo "=== 3. Проверка разрешения домена ==="
+if ! run_sudo "nslookup au-team.irpo 192.168.4.2" | grep -q "192.168.4.2"; then
+    echo "ОШИБКА: не удаётся разрешить домен au-team.irpo. Проверьте DNS на BR-SRV (192.168.4.2)."
+    exit 1
+fi
+
+echo "=== 4. Вход в домен ==="
+echo "$SUDO_PASS" | sudo -S realm join --user=Administrator au-team.irpo || {
+    echo "ОШИБКА: не удалось войти в домен. Проверьте работу Samba DC."
+    exit 1
+}
+
+echo "=== 5. Автосоздание домашних каталогов ==="
+run_sudo "grep -q 'pam_mkhomedir.so' /etc/pam.d/common-session || echo 'session optional pam_mkhomedir.so skel=/etc/skel umask=077' >> /etc/pam.d/common-session"
+run_sudo "systemctl enable --now sssd oddjobd"
+
+echo "=== 6. Sudo для группы sidehq ==="
+run_sudo "echo '%sidehq ALL=(ALL) NOPASSWD: /bin/cat, /bin/grep, /usr/bin/id' > /etc/sudoers.d/sidehq"
+run_sudo "chmod 440 /etc/sudoers.d/sidehq"
+
+echo "=== 7. Монтирование NFS ==="
+run_sudo "mkdir -p /mnt/nfs"
+run_sudo "grep -q '192.168.1.2:/raid1/nfs' /etc/fstab || echo '192.168.1.2:/raid1/nfs /mnt/nfs nfs defaults,_netdev 0 0' >> /etc/fstab"
+run_sudo "mount -a"
+
+echo "=== 8. Установка Яндекс Браузера ==="
+cd /tmp
+wget --no-check-certificate https://browser.yandex.ru/download/?os=linux -O yandex-browser.rpm
+run_sudo "dnf install -y /tmp/yandex-browser.rpm" || echo "Предупреждение: браузер не установлен (возможно, ссылка устарела)"
+rm -f yandex-browser.rpm
+
+echo "=== Настройка HQ-CLI завершена ==="
